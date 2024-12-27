@@ -49,5 +49,3 @@ This repository require :
 
 #### For RQ3
 `python rq3.py`
-
-## Citation
