@@ -1,0 +1,11 @@
+__test_seeds/
+**/__pycache__/
+__out/
+*__out/
+data/
+__rq1_out/
+.vscode/
+*.log
+*.png
+*.pdf
+*.xlsx
