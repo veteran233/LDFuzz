@@ -246,12 +246,12 @@ if __name__ == '__main__':
     parser.add_argument(
         '-gc',
         nargs='+',
-        help='guidance criteria list, split by comma, e.g. spc sec',
+        help='guidance criteria list, split by blankspace, e.g. spc sec',
         required=True)
     parser.add_argument(
         '-s',
         nargs='+',
-        help='seed selection strategy list, split by comma, e.g. new,random',
+        help='seed selection strategy list, split by blankspace, e.g. new random',
         required=True)
 
     parser.add_argument('-mi',

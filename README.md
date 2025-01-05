@@ -151,9 +151,9 @@ usage: run_fuzzer.py [-h] -m M [M ...] -gc GC [GC ...] -s S [S ...] [-mi MI]
 optional arguments:
   -h, --help       show this help message and exit
   -m M [M ...]     model list, split by blankspace, e.g. pointpillar pv_rcnn
-  -gc GC [GC ...]  guidance criteria list, split by comma, e.g. spc sec
-  -s S [S ...]     seed selection strategy list, split by comma, e.g.
-                   new,random
+  -gc GC [GC ...]  guidance criteria list, split by blankspace, e.g. spc sec
+  -s S [S ...]     seed selection strategy list, split by blankspace, e.g.
+                   new random
   -mi MI           max iteration, default : 1000
 ```
 
