@@ -103,7 +103,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--only-seeds',
         action='store_true',
-        help='if this arg set, it will only genereate test seeds')
+        help='if this arg set, it will only generate test seeds')
     args = parser.parse_args()
 
     data_name = 'kitti'

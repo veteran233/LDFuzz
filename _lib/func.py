@@ -17,7 +17,6 @@ from pcdet.ops.iou3d_nms import iou3d_nms_utils
 from _lib.queue.queue import FuzzQueue
 from _lib.queue.queue_coverage import ImageInputCorpus
 from _lib.queue.seed import Seed
-from _others.mutators import Mutators
 from _others.velodyne_mutators import METHOD, WEATHER_METHOD
 from utils import config, DUMPS_utlis
 from utils.coverage_utils import cal_single_c1, cal_single_c2, get_gt_polygon, get_scene_graph_encode
