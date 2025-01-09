@@ -4,7 +4,6 @@ import argparse
 
 os.environ['PROJECT_DIR'] = '/home/szw/code/r_deephunter'
 
-# import shutil
 import copy
 from torch.utils.data import DataLoader
 from utils import config
@@ -20,8 +19,6 @@ from pcdet.datasets.kitti.kitti_dataset import KittiDataset
 import pickle
 import torch
 
-# try_num = 50
-# num = 20
 eps = np.finfo(np.float32).eps
 rq1_root_path = './__rq1_out'
 seeds_path = f'{rq1_root_path}/seeds'

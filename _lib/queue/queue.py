@@ -57,8 +57,8 @@ class FuzzQueue(object):
         self.last_crash_time = self.start_time
         self.last_reg_time = self.start_time
         self.current_id = 0
-        self.seed_attacked = set()  # 只记录根种子
-        self.seed_bugs = defaultdict(int)  # 记录(轮次,种子id)
+        self.seed_attacked = set()
+        self.seed_bugs = defaultdict(int)
         self.seed_attacked_first_time = dict()
 
         self.dry_run_cov = None
@@ -83,9 +83,8 @@ class FuzzQueue(object):
     #         self.virgin_bits = cur
     #     return has_new or self.random
 
-    # 统计覆盖对
     # def set_deverse_bins(self, i, j, iter):  # i ground truth  j meta-data
-    #     if self.diverse_iter_bins[i][j] != 0:  # 如果是空的,代表第一次发现
+    #     if self.diverse_iter_bins[i][j] != 0:
     #         self.diverse_iter_bins[i][j] = iter
     #     self.diverse_num_bins[i][j] += 1
 
@@ -156,7 +155,7 @@ class FuzzQueue(object):
     #     # Compute the current coverage in the queue
     #     cov = float(self.total_cov - np.count_nonzero(self.virgin_bits == 0xFF)) * 100 / self.total_cov
 
-    #     if self.criteria == "space":  # DeepHunter中Pr有一半的区域是不会被覆盖
+    #     if self.criteria == "space":
     #         coverage = round(cov * 2, 2)
     #     else:
     #         coverage = round(cov, 2)

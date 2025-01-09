@@ -10,24 +10,16 @@ import os
 
 os.environ['PROJECT_DIR'] = '/home/szw/code/r_deephunter'
 
-# from keras.models import load_model
 from utils.KITTI_LoadModel import load_model, load_frd_model
-# import tensorflow as tf
-# from keras.utils import CustomObjectScope
 from tqdm import tqdm
 
 from _lib.fuzzer import Fuzzer
 from _lib.queue.seed import Seed
-# from statistics import draw
 from utils import DUMPS_utlis
 from utils.config import metrics_para, get_seed_path, get_output_path
 from _lib.func import metadata_function, iterate_function, build_objective_function, build_fetch_function, build_frd_function, velodyne_mutation_function_2
 
 sys.path.append('../')
-
-# from keras import Input
-
-# from keras.applications import MobileNet, VGG19, ResNet50
 
 import random
 import time
@@ -35,7 +27,6 @@ from datetime import datetime as dt
 from _lib.queue.queue_coverage import ImageInputCorpus
 
 
-# 初始队列里只有10个数据
 def dry_run(indir, fetch_function, queue, batch_num):
     seed_lis = os.listdir(indir)
     # Read each initial seed and analyze the coverage
@@ -91,36 +82,6 @@ def dry_run(indir, fetch_function, queue, batch_num):
     queue.DUMPS['frd_limit'] /= len(queue.DUMPS['scene'])
 
 
-# 获得实验模型
-# def get_model(args):
-#     img_rows, img_cols = 224, 224
-#     input_shape = (img_rows, img_cols, 3)
-#     input_tensor = Input(shape=input_shape)
-#     model = None
-#     if args.model == 'mobilenet':
-#         model = MobileNet(input_tensor=input_tensor)
-#     elif args.model == 'vgg19':
-#         model = VGG19(input_tensor=input_tensor)
-#     elif args.model == 'resnet50':
-#         model = ResNet50(input_tensor=input_tensor)
-#     else:
-#         model_path = get_model_weight_path(args.data_name, args.model)
-#         print(model_path)
-#         model = load_model(model_path)
-#     return model
-
-
-# 覆盖指标
-def get_cri(args):
-    if args.metric_para is None:
-        cri = metrics_para[args.criteria]
-    elif args.criteria == 'nc':
-        cri = args.metric_para
-    else:
-        cri = int(args.metric_para)
-    return cri
-
-
 def get_queue(args):
     # The seed queue
     # if args.criteria == 'fann':
@@ -129,35 +90,6 @@ def get_queue(args):
     queue = ImageInputCorpus(args.o, args.random, args.select, args.criteria,
                              args.check_point, args.DUMPS)
     return queue
-
-
-# function
-def get_func(args):
-    # if args.quantize_test == 1:
-    #     model_names = os.listdir(args.quan_model_dir)
-    #     model_paths = [os.path.join(args.quan_model_dir, name) for name in model_names]
-    #     if args.model == 'mobilenet':
-    #         import keras
-    #         with CustomObjectScope({'relu6': keras.applications.mobilenet.relu6,
-    #                                 'DepthwiseConv2D': keras.applications.mobilenet.DepthwiseConv2D}):
-    #             models = [load_model(m) for m in model_paths]
-    #     else:
-    #         models = [load_model(m) for m in model_paths]
-    #     # fetch_function = build_fetch_function(coverage_handler, preprocess, models)
-    #     model_names.insert(0, args.model)
-    # else:
-    #     # fetch_function = build_fetch_function(coverage_handler, preprocess)
-    #     model_names = [args.model]
-
-    # Like AFL, dry_run will run all initial seeds and keep all initial seeds in the seed queue
-
-    # The function to update coverage
-    # coverage_function = coverage_handler.update_coverage
-    # The function to perform the mutation from one seed
-    # mutation_function = image_mutation_function(args.batch_num)  # 不用改
-    fetch_function = build_fetch_function(args.model, args.loader)
-    mutation_function = velodyne_mutation_function()
-    return fetch_function, mutation_function
 
 
 def execute(args):
@@ -178,7 +110,7 @@ def execute(args):
 
     # Load the profiling information which is needed by the metrics in DeepGauge
     # model_profile_path = get_model_profile_path(data_name, model_name)
-    # profile_dict = pickle.load(open(model_profile_path, 'rb'))  # 均值,方差, 不知道,下边界,上边界
+    # profile_dict = pickle.load(open(model_profile_path, 'rb'))
     # print(profile_dict)
     # Load the configuration for the selected metrics.
     # cri = get_cri(args)
@@ -207,7 +139,7 @@ def execute(args):
 
     # Perform the dry_run process from the initial seeds
     dry_run_fetch = fetch_function
-    dry_run(args.i, dry_run_fetch, queue, args.batch_num)  # dry_run 初始化队列
+    dry_run(args.i, dry_run_fetch, queue, args.batch_num)
 
     # For each seed, compute the coverage and check whether it is a "bug", i.e., adversarial example
     objective_function = build_objective_function(args)
@@ -251,7 +183,8 @@ if __name__ == '__main__':
     parser.add_argument(
         '-s',
         nargs='+',
-        help='seed selection strategy list, split by blankspace, e.g. new random',
+        help=
+        'seed selection strategy list, split by blankspace, e.g. new random',
         required=True)
 
     parser.add_argument('-mi',
