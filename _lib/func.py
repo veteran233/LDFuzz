@@ -17,7 +17,6 @@ from pcdet.ops.iou3d_nms import iou3d_nms_utils
 from _lib.queue.queue import FuzzQueue
 from _lib.queue.queue_coverage import ImageInputCorpus
 from _lib.queue.seed import Seed
-from _others.mutators import Mutators
 from _others.velodyne_mutators import METHOD, WEATHER_METHOD
 from utils import config, DUMPS_utlis
 from utils.coverage_utils import cal_single_c1, cal_single_c2, get_gt_polygon, get_scene_graph_encode
@@ -268,17 +267,17 @@ def build_objective_function(args):
         ref_mean_scores = np.mean(ref_gt_scores_list)
         mean_scores = np.mean(gt_scores_list)
 
-        # if args.criteria == 'c1_confi':  # 第一个覆盖, 置信度
+        # if args.criteria == 'c1_confi':
         #     ret = ref_coverage1 < coverage1 or mean_scores <= ref_mean_scores
-        # elif args.criteria == 'c2_confi':  # 第二个覆盖, 置信度
+        # elif args.criteria == 'c2_confi':
         #     ret = ref_coverage2 < coverage2 or mean_scores <= ref_mean_scores
-        # elif args.criteria == 'confi':  # 仅置信度
+        # elif args.criteria == 'confi':
         #     ret = mean_scores <= ref_mean_scores
-        # elif args.criteria == 'c1':  # 仅第一个覆盖
+        # elif args.criteria == 'c1':
         #     ret = ref_coverage1 < coverage1
-        # elif args.criteria == 'c2':  # 仅第二个覆盖
+        # elif args.criteria == 'c2':
         #     ret = ref_coverage2 < coverage2
-        # elif args.criteria == 'none':  # 无
+        # elif args.criteria == 'none':
         #     ret = True
         # else:
         #     raise Exception(
@@ -510,7 +509,6 @@ def iterate_function(args):
 
 #############################
 # fetch_function
-# 返回输出的最后一层一定要是输出层,这样才有label
 def fetch_function(model, loader, input_batches, is_eval):
     input_batches = copy.deepcopy(input_batches)
     if input_batches[0]['weather_type'] in WEATHER_METHOD:
