@@ -176,3 +176,9 @@ python rq2.py
 ```
 
 #### For RQ3
+RQ3 aims to comprehensively evaluate the effectiveness of LDFuzz in identifying the diversity of erroneous behaviors.
+
+Output the result `rq3_area.pdf`, `rq3_count.pdf`.
+```
+python rq3.py
+```
