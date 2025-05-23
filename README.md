@@ -1,7 +1,7 @@
 LDFuzz
 ======
 
-This is the official implementation of paper. "A Spatial Semantic Fuzzing Framework for LiDAR-based Autonomous Driving Perception Systems".
+This is the official implementation of paper. "Spatial Semantic Fuzzing for LiDAR-based Autonomous Driving Perception Systems".
 
 This repository contains a fuzzing framework for LiDAR-based termed `LDFuzz`, for testing autonomous driving perception systems.
 
