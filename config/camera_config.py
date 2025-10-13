@@ -1,4 +1,4 @@
-blender_path = '/home/szw/code/blender-4.1.0-linux-x64/blender'
+blender_path = '/path/to/blender'
 
 img_width = 1242
 img_height = 375

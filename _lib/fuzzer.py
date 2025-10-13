@@ -2,19 +2,17 @@
 
 # import tensorflow as tf
 import gc
-import time
-import numpy as np
 from utils import config, DUMPS_utlis
 import pickle
-import os
 from _others.fid.lidargen_fid import get_fid
+from _lib.queue.seed import Seed
 
 
 class Fuzzer(object):
     """Class representing the fuzzer itself."""
 
     def __init__(self,
-                 corpus,
+                 queue,
                  metadata_function,
                  objective_function,
                  mutation_function,
@@ -37,7 +35,7 @@ class Fuzzer(object):
       Initialized object.
     """
         self.plot = plot
-        self.queue = corpus
+        self.queue = queue
         self.metadata_function = metadata_function
         self.objective_function = objective_function
         self.mutation_function = mutation_function
@@ -67,54 +65,83 @@ class Fuzzer(object):
 
             if len(self.queue.queue) < 1 or iteration >= iterations:
                 break
-            # if iteration % 100 == 0:
+
             if True:
-                # tf.logging.info("fuzzing iteration: %s", iteration)
-                # print("fuzzing iteration: %s"%(iteration))
                 gc.collect()
 
-            selected_parent_list = []
-            mutated_data_batches = []
+            selected_seed_list = []
+            mutated_data_dict = []
 
             for __i in range(4):
-                T_p, T_db = self.mutation_function()
-                selected_parent_list.append(T_p)
-                mutated_data_batches.append(T_db)
+                method, parent, data_dict = self.mutation_function()
+                print(' -- ok')
 
-                scene = T_p.root_seed.split('.')[0]
+                seed = Seed(parent.root_seed, parent)
+
+                selected_seed_list.append(seed)
+                mutated_data_dict.append(data_dict)
 
                 # calculate frd
-                frd_score = get_fid(
-                    self.frd_function(
-                        self.queue.DUMPS['scene'][scene]['points']),
-                    self.frd_function(mutated_data_batches[-1]['points']))
-                frd_limit = self.queue.DUMPS['frd_limit']
-                if frd_score > frd_limit:
-                    selected_parent_list.pop()
-                    mutated_data_batches.pop()
-                    print(
-                        f'## Exceeded FRD Score Limit ## Current Score : {frd_score}, Limit : {frd_limit}'
+                if method in config.scene_level:
+                    seed.cal_frd_with = None
+                    mutated_data_dict[-1]['frd_score'] = self.queue.frd_score[
+                        f'{parent.id:06d}']
+                    print('  ignore calculation of frd.')
+                elif method in config.object_level:
+                    ref_batch = pickle.load(
+                        open(self.queue.frd_fname[f'{seed.cal_frd_with:06d}'],
+                             'rb'))
+
+                    while isinstance(ref_batch, list):
+                        ref_batch = ref_batch[0]
+
+                    frd_score = get_fid(
+                        self.frd_function(ref_batch['points']),
+                        self.frd_function(mutated_data_dict[-1]['points']),
                     )
 
-            for mutated_data_batch in mutated_data_batches:
-                coverage_batches, metadata_batches = self.fetch_function(
-                    [mutated_data_batch])
+                    frd_score += self.queue.frd_score[
+                        f'{seed.cal_frd_with:06d}']
 
-                mutated_data_batch['pred_scores'] = coverage_batches[0]
-                mutated_data_batch['pred_boxes'] = metadata_batches[0]
+                    mutated_data_dict[-1]['frd_score'] = frd_score
+                else:
+                    raise NotImplementedError
 
-            if len(mutated_data_batches) > 0:
-                self.iterate_function(self.queue, selected_parent_list,
-                                      mutated_data_batches,
+                after_score = mutated_data_dict[-1]['frd_score']
+                if seed.cal_frd_with is None:
+                    before_score = after_score
+                else:
+                    before_score = self.queue.frd_score[
+                        f'{seed.cal_frd_with:06d}']
+
+                frd_limit = self.queue.DUMPS['frd_limit']
+                print(
+                    f'  FRD : {before_score} --> {after_score}, limit : {frd_limit}'
+                )
+                if after_score > frd_limit:
+                    selected_seed_list.pop()
+                    mutated_data_dict.pop()
+                    print(
+                        f'  -- Exceeded FRD Score Limit ## Current Score : {after_score}, Limit : {frd_limit}'
+                    )
+
+            if len(mutated_data_dict) > 0:
+                pred_boxes, pred_scores, pred_labels = self.fetch_function(
+                    mutated_data_dict)
+
+                for _b, data_dict in enumerate(mutated_data_dict):
+                    data_dict['pred_boxes'] = pred_boxes[_b]
+                    data_dict['pred_scores'] = pred_scores[_b]
+                    data_dict['pred_labels'] = pred_labels[_b]
+
+            if len(mutated_data_dict) > 0:
+                self.iterate_function(self.queue, selected_seed_list,
+                                      mutated_data_dict,
                                       self.objective_function)
             else:
                 print(f'## All Exceeded FRD Score Limit ##')
 
                 DUMPS_utlis.updateIter_DUMPS_errorMetric(self.queue.DUMPS)
-
-            # del mutated_data_batches
-            # del coverage_batches
-            # del metadata_batches
 
             iteration += 1
 

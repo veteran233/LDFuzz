@@ -7,7 +7,23 @@ from shapely.geometry import MultiPoint, Polygon, MultiPolygon
 
 from pcdet.utils import box_utils
 
-from .config import scene_level, scene_graph_length_list, scene_graph_width_list
+from .config import scene_level, scene_graph_length_list, scene_graph_width_list, kitti, nuscenes
+
+nuscenes_class = [
+    'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'motorcycle',
+    'bicycle', 'pedestrian'
+]
+kitti_class = ['Car']
+
+
+def cls2bit(dataset_name, cls: str):
+
+    if dataset_name == kitti:
+        x = kitti_class.index(cls)
+    elif dataset_name == nuscenes:
+        x = nuscenes_class.index(cls)
+
+    return 1 << x
 
 
 def get_coverage1_area(DUMPS, error=False) -> float:
@@ -29,6 +45,20 @@ def get_coverage2_count(DUMPS, error=False) -> int:
         else:
             ret += len(DUMPS['cluster'][sg_type]['cluster'])
 
+    return ret
+
+
+def get_fp_coverage1_area(DUMPS) -> float:
+    ret = 0
+    for scene in DUMPS['scene']:
+        ret += DUMPS['scene'][scene]['fp_polygon'].area
+    return ret
+
+
+def get_fp_coverage2_count(DUMPS) -> int:
+    ret = 0
+    for sg_type in DUMPS['cluster']:
+        ret += len(DUMPS['cluster'][sg_type]['fp_cluster'])
     return ret
 
 
@@ -65,6 +95,7 @@ def get_scene_graph_type(hull: Polygon) -> int:
     for length in scene_graph_length_list:
         for width in scene_graph_width_list:
             area = shapely.box(length[0], width[0], length[1], width[1])
+            # area = shapely.box(width[0], length[0], width[1], length[1])
             if hull.intersects(area):
                 ret |= base
             base <<= 1
@@ -81,11 +112,12 @@ def get_gt_polygon(
     return ret
 
 
-def get_scene_graph_encode(selected_gt_boxes: np.ndarray,
+def get_scene_graph_encode(dataset_name, selected_gt_boxes: np.ndarray,
                            selected_name: np.ndarray, weather_type: str,
                            sg_type: int) -> int:
-    ret = 0
+    ret = [0, 0, 0, 0, 0, 0, 0]  # (..., weather)
     for k in range(selected_gt_boxes.shape[0]):
+        index = 0
         base = 1
         x = selected_gt_boxes[k][0]
         y = selected_gt_boxes[k][1]
@@ -95,20 +127,21 @@ def get_scene_graph_encode(selected_gt_boxes: np.ndarray,
                 if sg_type & base:
                     if length[0] <= x and x < length[1] and width[
                             0] <= y and y < width[1]:
-                        if name == 'Car': ret |= base
+                        # if length[0] <= y and y < length[1] and width[
+                        #         0] <= x and x < width[1]:
+                        ret[index] |= cls2bit(dataset_name, name)
+                index += 1
                 base <<= 1
 
-    base = 1
-    for length in scene_graph_length_list:
-        for width in scene_graph_width_list:
-            base <<= 1
+    # sunny : 0
+    # rain : 1
+    # snow : 2
+    # fog : 3
+    if weather_type == 'rain': ret[6] = 1
+    if weather_type == 'snow': ret[6] = 2
+    if weather_type == 'fog': ret[6] = 3
 
-    if weather_type == 'rain': ret |= base
-    base <<= 1
-    if weather_type == 'snow': ret |= base
-    base <<= 1
-    if weather_type == 'fog': ret |= base
-    return ret
+    return tuple(ret)
 
 
 def cal_single_c1(polygon: Union[Polygon, MultiPolygon],
@@ -118,46 +151,4 @@ def cal_single_c1(polygon: Union[Polygon, MultiPolygon],
 
 def cal_single_c2(sg_encode_set: set, sg_type: int) -> float:
     sg = len(sg_encode_set)
-    tot_sg = (2**bin(sg_type).count('1')) * (len(scene_level) + 1)
-    return sg / tot_sg
-
-
-# def get_coverage2_count(DUMPS, error=False) -> int:
-#     ret = 0
-#     for scene in DUMPS['scene']:
-#         if error:
-#             ret += len(DUMPS['scene'][scene]['error_cluster'])
-#         else:
-#             ret += len(DUMPS['scene'][scene]['cluster'])
-
-#     return ret
-
-# def get_coverage2_DUMPSver(DUMPS, error=False) -> float:
-#     sg, tot_sg = 0, 0
-#     for scene in DUMPS['scene']:
-#         sg_type = DUMPS['scene'][scene]['scene_graph_type']
-#         if error:
-#             sg += len(DUMPS['scene'][scene]['error_cluster'])
-#         else:
-#             sg += len(DUMPS['scene'][scene]['cluster'])
-#         tot_sg += (2**bin(sg_type).count('1')) * (len(config.scene_level) + 1)
-
-#     return sg / tot_sg
-
-# def get_scene_coverage1_DUMPSver(DUMPS, scene: str, error=False) -> float:
-#     if error:
-#         polygon = DUMPS['scene'][scene]['error_polygon']
-#     else:
-#         polygon = DUMPS['scene'][scene]['gt_polygon']
-#     hull = DUMPS['scene'][scene]['road_hull']
-
-#     return cal_single_c1(polygon, hull)
-
-# def get_scene_coverage2_DUMPSver(DUMPS, scene, error=False) -> float:
-#     if error:
-#         cluster = DUMPS['scene'][scene]['error_cluster']
-#     else:
-#         cluster = DUMPS['scene'][scene]['cluster']
-#     sg_type = DUMPS['scene'][scene]['scene_graph_type']
-
-#     return cal_single_c2(cluster, sg_type)
+    return sg

@@ -1,11 +1,19 @@
-__test_seeds/
 **/__pycache__/
+**/.vscode/
+**/.venv/
+
+__rq1_out/
 __out/
 *__out/
-data/kitti/training/
-__rq1_out/
-.vscode/
-*.log
+
+__test_seeds/
+
+# output images
 *.png
 *.pdf
+
+# excel files
 *.xlsx
+
+# log files
+*.log

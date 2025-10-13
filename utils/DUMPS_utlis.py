@@ -1,5 +1,5 @@
 from .config import object_level, scene_level
-from .coverage_utils import get_scene_graph_type, get_scene_graph_encode, get_gt_polygon, get_coverage1_area, get_coverage1_DUMPSver, get_coverage2_count, get_coverage2_DUMPSver
+from .coverage_utils import get_scene_graph_type, get_scene_graph_encode, get_gt_polygon, get_coverage1_area, get_coverage1_DUMPSver, get_coverage2_count, get_coverage2_DUMPSver, get_fp_coverage1_area, get_fp_coverage2_count
 from shapely.geometry import Polygon
 
 error_metric = [
@@ -8,7 +8,6 @@ error_metric = [
 
 
 def init_DUMPS(DUMPS):
-    # DUMPS.clear()
     DUMPS['scene'] = {}
     DUMPS['cluster'] = {}
     DUMPS['fp'] = {i: [0] for i in object_level + scene_level}
@@ -34,6 +33,9 @@ def init_DUMPS(DUMPS):
     DUMPS['error_coverage2_count_list'] = []
     DUMPS['frd_limit'] = 0
 
+    DUMPS['fp_coverage1_area_list'] = []
+    DUMPS['fp_coverage2_count_list'] = []
+
 
 def updateIter_DUMPS_errorMetric(DUMPS):
     for m in error_metric:
@@ -41,13 +43,11 @@ def updateIter_DUMPS_errorMetric(DUMPS):
             DUMPS[m][_method].append(DUMPS[m][_method][-1])
 
 
-def updateBatches_DUMPS(DUMPS, seed_name, batch, metadata_list):
+def updateBatches_DUMPS(DUMPS, dataset_name, seed_name, batch, metadata_list):
     batch['level'] = 1
     batch['pred_boxes'] = metadata_list
     batch['criteria'] = DUMPS['criteria']
 
-    kitti_idx = batch['point_cloud']['lidar_idx']
-    points = batch['points']
     selected_gt_boxes = batch['selected_gt_boxes']
     selected_name = batch['selected_name']
     weather_type = batch['weather_type']
@@ -59,8 +59,8 @@ def updateBatches_DUMPS(DUMPS, seed_name, batch, metadata_list):
     scene = seed_name.split('.')[0]
     batch['scene'] = scene
 
-    sg_encode = get_scene_graph_encode(selected_gt_boxes, selected_name,
-                                       weather_type, sg_type)
+    sg_encode = get_scene_graph_encode(dataset_name, selected_gt_boxes,
+                                       selected_name, weather_type, sg_type)
     gt_polygon = get_gt_polygon(selected_gt_boxes)
 
     cluster = set([sg_encode])
@@ -70,11 +70,10 @@ def updateBatches_DUMPS(DUMPS, seed_name, batch, metadata_list):
 
     dict_scene.update({
         scene: {
-            'kitti_idx': kitti_idx,
             'scene_graph_type': sg_type,
-            'points': points,
             'gt_polygon': gt_polygon,
             'error_polygon': Polygon(),
+            'fp_polygon': Polygon(),
             'road_hull': road_hull,
             'cluster': cluster,
             'error_cluster': set({0}),
@@ -94,9 +93,11 @@ def updateBatches_DUMPS(DUMPS, seed_name, batch, metadata_list):
         dict_cluster[sg_type] = {
             'cluster': set([sg_encode]),
             'error_cluster': set({0}),
+            'fp_cluster': set({0}),
             'scene_list': [scene],
             'count_cluster': {},
-            'count_error_cluster': {}
+            'count_error_cluster': {},
+            'count_fp_cluster': {}
         }
 
 
@@ -125,3 +126,9 @@ def updateCoverage_DUMPS(DUMPS):
     DUMPS['error_coverage1_area_list'].append(err_c1_area)
     DUMPS['coverage2_count_list'].append(c2_count)
     DUMPS['error_coverage2_count_list'].append(err_c2_count)
+
+    fp_cov1 = get_fp_coverage1_area(DUMPS)
+    fp_cov2 = get_fp_coverage2_count(DUMPS)
+
+    DUMPS['fp_coverage1_area_list'].append(fp_cov1)
+    DUMPS['fp_coverage2_count_list'].append(fp_cov2)

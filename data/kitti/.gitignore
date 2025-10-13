@@ -1,0 +1,4 @@
+# Ignore training dataset
+
+training/
+*.pkl
