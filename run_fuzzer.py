@@ -8,73 +8,63 @@ import sys
 import argparse, pickle
 import os
 
-os.environ['PROJECT_DIR'] = '/home/szw/code/r_deephunter'
+os.environ['PROJECT_DIR'] = os.path.dirname(__file__)
 
-from utils.KITTI_LoadModel import load_model, load_frd_model
 from tqdm import tqdm
 
 from _lib.fuzzer import Fuzzer
 from _lib.queue.seed import Seed
-from utils import DUMPS_utlis
-from utils.config import metrics_para, get_seed_path, get_output_path
-from _lib.func import metadata_function, iterate_function, build_objective_function, build_fetch_function, build_frd_function, velodyne_mutation_function_2
 
-sys.path.append('../')
+from utils import DUMPS_utlis
+from utils.config import get_seed_path, get_output_path
+from _lib.func import iterate_function, build_objective_function, build_fetch_function, build_frd_function, lidar_mutation_functionV2
 
 import random
 import time
 from datetime import datetime as dt
 from _lib.queue.queue_coverage import ImageInputCorpus
+from config.lidar_config import load_lidar_config
 
 
-def dry_run(indir, fetch_function, queue, batch_num):
-    seed_lis = os.listdir(indir)
-    # Read each initial seed and analyze the coverage
-    # for seed_name in tqdm(seed_lis):
-    # progress = iter(seed_lis)
+def dry_run(dataset_name, indir, fetch_function, queue, batch_size):
+    seed_list = sorted(os.listdir(indir))
     DUMPS_utlis.init_DUMPS(queue.DUMPS)
-    with tqdm(total=len(seed_lis)) as progress_bar:
-        for __i__ in range(0, len(seed_lis), batch_num):
-            # tf.logging.info("Attempting dry run with '%s'...", seed_name)
-            img = []
-            for __cnt__ in range(__i__, min(len(seed_lis), __i__ + batch_num)):
-                seed_name = seed_lis[__cnt__]
+
+    with tqdm(total=len(seed_list)) as progress_bar:
+        for start_index in range(0, len(seed_list), batch_size):
+            infos_dict = []
+            for index in range(start_index,
+                               min(len(seed_list), start_index + batch_size)):
+                seed_name = seed_list[index]
                 path = os.path.join(indir, seed_name)
                 with open(path, 'rb') as f:
-                    _temp = pickle.load(f)
-                    if not isinstance(_temp, list): _temp = [_temp]
-                    img += _temp
+                    _seed = pickle.load(f)
+                    if not isinstance(_seed, list): _seed = [_seed]
+                    infos_dict += _seed
                     progress_bar.update(1)
 
             # Each seed will contain two images, i.e., the reference image and mutant (see the paper)
-            input_batches = img
             # Predict the mutant and obtain the outputs
             # coverage_batches is the output of internal layers and metadata_batches is the output of the prediction result
-            _, metadata_batches = fetch_function(input_batches)
-            # Based on the output, compute the coverage information
-            metadata_list = metadata_function(metadata_batches)
-            # coverage_list = coverage_function(coverage_batches, lb=metadata_list)
-            # coverage_list = np.random.rand(1000)
-            # coverage_list = coverage_list * 2
-            # coverage_list = coverage_list.astype(dtype=np.uint8)
-            # Create a new seed
+            pred_boxes, _, _ = fetch_function(infos_dict)
 
-            for __cnt__ in range(0, batch_num):
-                if __i__ + __cnt__ >= len(seed_lis):
+            for index in range(0, batch_size):
+                if start_index + index >= len(seed_list):
                     break
 
-                seed_name = seed_lis[__i__ + __cnt__]
+                seed_name = seed_list[start_index + index]
                 scene = seed_name.split('.')[0]
 
                 input = Seed(seed_name, None)
 
-                DUMPS_utlis.updateBatches_DUMPS(queue.DUMPS, seed_name,
-                                                input_batches[__cnt__],
-                                                metadata_list[__cnt__])
+                DUMPS_utlis.updateBatches_DUMPS(queue.DUMPS, dataset_name,
+                                                seed_name, infos_dict[index],
+                                                pred_boxes[index])
 
-                queue.DUMPS['frd_limit'] += input_batches[__cnt__]['frd_limit']
+                queue.DUMPS['frd_limit'] += infos_dict[index]['frd_limit']
+                infos_dict[index]['frd_score'] = 0
 
-                queue.save_if_interesting(input, input_batches[__cnt__], False,
+                queue.save_if_interesting(input, infos_dict[index], False,
                                           True, scene)
 
     DUMPS_utlis.updateCoverage_DUMPS(queue.DUMPS)
@@ -83,70 +73,39 @@ def dry_run(indir, fetch_function, queue, batch_num):
 
 
 def get_queue(args):
-    # The seed queue
-    # if args.criteria == 'fann':
-    #     queue = TensorInputCorpus(args.o, args.random, args.select, cri, "kdtree")
-    # else:
-    queue = ImageInputCorpus(args.o, args.random, args.select, args.criteria,
+    queue = ImageInputCorpus(args.output_dir, args.select, args.criteria,
                              args.check_point, args.DUMPS)
     return queue
 
 
 def execute(args):
-    # Get the layers which will be excluded during the coverage computation
-    # exclude_layer_list = execlude_layer_dic[args.model]
 
     # Create the output directory including seed queue and crash dir, it is like AFL
-    # if os.path.exists(args.o):
-    #     shutil.rmtree(args.o)
-    os.makedirs(os.path.join(args.o, 'queue'))
-    os.makedirs(os.path.join(args.o, 'crashes'))
-    os.makedirs(os.path.join(args.o, 'result'))
-
-    # Load model. For ImageNet, we use the default models from Keras framework.
-    # For other models, we load the model from the h5 file.
-    # Get the preprocess function based on different dataset
-    # preprocess = get_preprocess(args.data_name)
-
-    # Load the profiling information which is needed by the metrics in DeepGauge
-    # model_profile_path = get_model_profile_path(data_name, model_name)
-    # profile_dict = pickle.load(open(model_profile_path, 'rb'))
-    # print(profile_dict)
-    # Load the configuration for the selected metrics.
-    # cri = get_cri(args)
-
-    # The coverage computer
-    # if args.criteria == 'space':
-    #     coverage_handler = SpaceCoverage(model=model, k=cri)
-    # elif args.criteria == "lsc":
-    #     coverage_handler = LSCoverage(model=model, data_name=args.data_name, model_name=args.model_name, k=cri)
-    # elif args.criteria == "fake":
-    #     coverage_handler = FakeCoverage(model=model)
-    # else:
-    # coverage_handler = Coverage(model=model, criteria=args.criteria, k=cri,
-    #                             profiling_dict=profile_dict, exclude_layer=exclude_layer_list)
-
-    # The log file which records the plot data after each iteration of the fuzzing
-    # plot_file = open(os.path.join(args.o, 'plot.log'), 'a+')
-
-    # If testing for quantization, we will load the quantized versions
-    # fetch_function is to perform the prediction and obtain the outputs of each layers
+    os.makedirs(os.path.join(args.output_dir, 'queue'))
+    os.makedirs(os.path.join(args.output_dir, 'crashes'))
+    os.makedirs(os.path.join(args.output_dir, 'result'))
 
     queue = get_queue(args)
 
-    fetch_function = build_fetch_function(args.model, args.loader)
-    mutation_function = velodyne_mutation_function_2(queue)
+    load_lidar_config(args.dataset_name)
+
+    fetch_function = build_fetch_function(args.dataset_name, args.model_name,
+                                          args.batch_size)
+
+    frd_function = build_frd_function(args.dataset_name)
+
+    mutation_function = lidar_mutation_functionV2(queue, args.dataset_name,
+                                                  args.criteria)
 
     # Perform the dry_run process from the initial seeds
-    dry_run_fetch = fetch_function
-    dry_run(args.i, dry_run_fetch, queue, args.batch_num)
+    dry_run(args.dataset_name, args.seed_path, fetch_function, queue,
+            args.batch_size)
 
     # For each seed, compute the coverage and check whether it is a "bug", i.e., adversarial example
     objective_function = build_objective_function(args)
-    frd_function = build_frd_function(args.frd_model)
 
     # The main fuzzer class
-    fuzzer = Fuzzer(queue, metadata_function,
+    fuzzer = Fuzzer(queue,
                     objective_function, mutation_function, fetch_function,
                     iterate_function(args), frd_function, args.select)
 
@@ -155,21 +114,19 @@ def execute(args):
     return time.time()
 
 
-def param2txt(file_path, msg, mode="a+"):
-    f = open(file_path, mode)
-    f.write(msg)
-    f.close
-
-
 if __name__ == '__main__':
-    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:128'
+    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'max_split_size_mb:64'
     # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+
     start_time = time.time()
 
-    # tf.logging.set_verbosity(tf.logging.INFO)
     random.seed(time.time())
 
     parser = argparse.ArgumentParser()
+    parser.add_argument('-d',
+                        nargs='+',
+                        help='Dataset list, e.g. kitti nuscenes',
+                        required=True)
     parser.add_argument(
         '-m',
         nargs='+',
@@ -178,72 +135,73 @@ if __name__ == '__main__':
     parser.add_argument(
         '-gc',
         nargs='+',
-        help='guidance criteria list, split by blankspace, e.g. spc sec',
+        help='guidance criteria list, split by comma, e.g. spc sec',
         required=True)
     parser.add_argument(
         '-s',
         nargs='+',
-        help=
-        'seed selection strategy list, split by blankspace, e.g. new random',
+        help='seed selection strategy list, split by comma, e.g. new,random',
         required=True)
 
     parser.add_argument('-mi',
+                        '--max-iteration',
                         help='max iteration, default : 1000',
                         type=int,
                         default=1000)
+    parser.add_argument('--batch-size', help='', type=int, default=2)
+    parser.add_argument('--iou-threshold', help='', type=float, default=0.7)
 
-    now = str(dt.strftime(dt.now(), '%Y-%m-%d_%H-%M-%S_%f'))
-    data_name = 'kitti'
+    parser.add_argument('--use-distance', help='', action='store_true')
+    parser.add_argument('--distance-threshold',
+                        help='',
+                        type=float,
+                        default=1.0)
+
     args = parser.parse_args()
 
+    now = str(dt.strftime(dt.now(), '%Y-%m-%d_%H-%M-%S_%f'))
+
+    args.now = now
+    args.check_point = args.max_iteration // 10
+
+    dataset_list = args.d
     model_list = args.m
     guidance_criteria_list = args.gc
     seed_selection_strategy_list = args.s
 
-    for model_name in model_list:
-        batch_num = 1
-        is_random = 1
-        input_dir = get_seed_path(data_name, model_name)
+    for dataset_name in dataset_list:
+        for model_name in model_list:
 
-        args.data_name = data_name
-        args.model_name = model_name
+            args.dataset_name = dataset_name
+            args.model_name = model_name
+            args.seed_path = get_seed_path(dataset_name, model_name)
 
-        args.model, args.loader = load_model(args.model_name)
-        args.frd_model = load_frd_model()
-
-        args.now = now
-        args.random = is_random
-        args.i = input_dir
-        args.max_iteration = args.mi
-        args.check_point = args.mi // 10
-        args.batch_num = batch_num
-
-        for criteria in guidance_criteria_list:
             for select in seed_selection_strategy_list:
-                args.criteria = criteria
-                args.select = select
+                for criteria in guidance_criteria_list:
 
-                output_dir = get_output_path(args.data_name,
-                                             args.model_name,
-                                             args.select,
-                                             args.criteria,
-                                             num=0)
+                    args.select = select
+                    args.criteria = criteria
 
-                output_dir = args.now + output_dir
+                    output_dir = get_output_path(dataset_name, model_name,
+                                                 select, criteria)
 
-                os.makedirs(output_dir)
-                f = open(f'{output_dir}/out.log', 'w')
-                sys_out = sys.stdout
-                sys.stdout = f
+                    output_dir = now + output_dir
 
-                args.o = output_dir
-                args.DUMPS = {'criteria': args.criteria}
-                args.iou_threshold = 0.7
-                print(args)
-                start_time = time.time()
-                end_time = execute(args)
-                ftime = end_time - start_time
-                print('finish', ftime)
+                    os.makedirs(output_dir)
+                    f = open(f'{output_dir}/out.log', 'w')
+                    sys_out = sys.stdout
+                    sys.stdout = f
 
-                sys.stdout = sys_out
-                f.close()
+                    print(args)
+
+                    args.output_dir = output_dir
+                    args.DUMPS = {'criteria': criteria}
+
+                    start_time = time.time()
+                    end_time = execute(args)
+                    ftime = end_time - start_time
+
+                    print('finish', ftime)
+
+                    sys.stdout = sys_out
+                    f.close()

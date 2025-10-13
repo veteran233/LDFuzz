@@ -17,11 +17,9 @@ class Seed(object):
           Initialized object.
         """
 
-        # self.metadata = metadata
         self.parent = parent
         self.root_seed = root_seed
         self.queue_time = None
         self.id = None
-        # The initial probability to select the current seed.
-        # self.probability = 0.8
+        self.cal_frd_with = None if parent is None else parent.cal_frd_with
         self.fuzzed_time = 0

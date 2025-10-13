@@ -1,0 +1,11 @@
+# Ignore nuscenes v1.0-trainval dataset
+
+gt_database_10sweeps_withvelo/
+lidarseg/
+maps/
+road_label/
+samples/
+sweeps/
+v1.0-trainval/
+LICENSE
+*.pkl

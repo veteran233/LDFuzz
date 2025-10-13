@@ -1,7 +1,6 @@
 import os
 import copy
 import numpy as np
-import pickle
 from pathlib import Path
 
 from pylisa.lisa import Lisa
@@ -169,60 +168,79 @@ def Max2_to_Lidar(points, gt_boxes_lidar):
     return points.astype(np.float32)
 
 
-def generate_location_cheaply(hull, polygon, criteria):
+class Mutator():
 
-    area_list = []
-    if criteria == config.spc or criteria == config.error_spc:
-        area_list.append(hull.difference(polygon))
-        if area_list[-1].is_empty:
-            area_list.pop()
-    elif criteria == config.sec or criteria == config.error_sec:
+    def __init__(self, dataset_name, criteria=None):
+        self.dataset_name = dataset_name
+        self.criteria = criteria
+
+    def generate_method_list(self):
+        method_list = {}
+
+        for method in config.scene_level:
+            method_list[method] = getattr(self, method)
+
+        for method in config.object_level:
+            method_list[method] = getattr(self, method)
+
+        return method_list
+
+    def generate_area_list(self, hull):
+        area_list = []
+
         for length in config.scene_graph_length_list:
             for width in config.scene_graph_width_list:
-                area_list.append(
-                    hull.intersection(
-                        box(length[0], width[0], length[1], width[1])))
+
+                if self.dataset_name == config.kitti:
+                    area_list.append(
+                        hull.intersection(
+                            box(length[0], width[0], length[1], width[1])))
+
+                elif self.dataset_name == config.nuscenes:
+                    area_list.append(
+                        hull.intersection(
+                            box(width[0], length[0], width[1], length[1])))
+
                 if area_list[-1].is_empty:
                     area_list.pop()
-    elif criteria == config.ldfuzz or criteria == config.error_mixed:
-        hull = hull.difference(polygon)
-        for length in config.scene_graph_length_list:
-            for width in config.scene_graph_width_list:
-                area_list.append(
-                    hull.intersection(
-                        box(length[0], width[0], length[1], width[1])))
-                if area_list[-1].is_empty:
-                    area_list.pop()
-    elif criteria == config.none:
-        area_list.append(hull)
 
-    if len(area_list):
-        selected_area = np.random.choice(area_list)
-        return np.array(selected_area.point_on_surface().xy).reshape(-1)
+        return area_list
 
-    return None
+    def generate_location_cheaply(self, hull, polygon):
 
+        area_list = []
+        if self.criteria in [
+                config.spc, config.error_spc, config.sec, config.error_sec
+        ]:
+            area_list = self.generate_area_list(hull)
+        elif self.criteria in [config.ldfuzz, config.error_mixed]:
+            hull = hull.difference(polygon)
+            area_list = self.generate_area_list(hull)
+        elif self.criteria == config.none:
+            area_list.append(hull)
 
-class Mutators():
+        if len(area_list):
+            selected_area = np.random.choice(area_list)
+            return np.array(selected_area.point_on_surface().xy).reshape(-1)
 
-    @staticmethod
-    def _rain_mutate(ret, rate=None, DUMPS=None):
-        ret['is_fn'] *= False
-        ret['weather_type'] = 'rain'
-        ret['w_c'] = np.random.uniform(0.1, 10) if rate is None else rate
+        return None
 
-        return [ret]
-
-    @staticmethod
-    def _rain_(ret, rate=None, DUMPS=None):
+    def rain(self, ret, rate=None, DUMPS=None):
         c = np.random.uniform(0.1, 10) if rate is None else rate
+
+        if self.dataset_name == config.nuscenes:
+            # normalization : 0-255 --> 0-1
+            ret['points'][:, 3] /= 255
 
         ret['points'] = Lisa(atm_model='rain').augment(
             ret['points'], c)[:, :-1].astype(dtype=np.float32)
 
+        if self.dataset_name == config.nuscenes:
+            # 0-1 --> 0-255
+            ret['points'][:, 3] *= 255
+
         ret['points'] = ret['points'][np.where(
             np.sum(ret['points'] != [0.0, 0.0, 0.0, 0.0], axis=1))]
-        ret['ref_points'] = copy.deepcopy(ret['points'])
 
         corners_lidar = box_utils.boxes_to_corners_3d(ret['selected_gt_boxes'])
         selected_mask = None
@@ -242,27 +260,26 @@ class Mutators():
                 ).reshape(1, -1)
 
         ret['selected_pc_mask'] = selected_mask
+        ret['weather_type'] = 'rain'
 
         return [ret]
 
-    @staticmethod
-    def _snow_mutate(ret, rate=None, DUMPS=None):
-        ret['is_fn'] *= False
-        ret['weather_type'] = 'snow'
-        ret['w_c'] = np.random.uniform(0.1, 2.4) if rate is None else rate
-
-        return [ret]
-
-    @staticmethod
-    def _snow_(ret, rate=None, DUMPS=None):
+    def snow(self, ret, rate=None, DUMPS=None):
         c = np.random.uniform(0.1, 2.4) if rate is None else rate
+
+        if self.dataset_name == config.nuscenes:
+            # normalization : 0-255 --> 0-1
+            ret['points'][:, 3] /= 255
 
         ret['points'] = Lisa(atm_model='snow').augment(
             ret['points'], c)[:, :-1].astype(dtype=np.float32)
 
+        if self.dataset_name == config.nuscenes:
+            # 0-1 --> 0-255
+            ret['points'][:, 3] *= 255
+
         ret['points'] = ret['points'][np.where(
             np.sum(ret['points'] != [0.0, 0.0, 0.0, 0.0], axis=1))]
-        ret['ref_points'] = copy.deepcopy(ret['points'])
 
         corners_lidar = box_utils.boxes_to_corners_3d(ret['selected_gt_boxes'])
         selected_mask = None
@@ -282,35 +299,32 @@ class Mutators():
                 ).reshape(1, -1)
 
         ret['selected_pc_mask'] = selected_mask
+        ret['weather_type'] = 'snow'
 
         return [ret]
 
-    @staticmethod
-    def _fog_mutate(ret, rate=None, DUMPS=None):
-        ret['is_fn'] *= False
-        ret['weather_type'] = 'fog'
-        ret['w_c'] = np.random.uniform(200, 1000) if rate is None else rate
-
-        return [ret]
-
-    @staticmethod
-    def _fog_(ret, rate=None, DUMPS=None):
+    def fog(self, ret, rate=None, DUMPS=None):
         c = np.random.uniform(200, 1000) if rate is None else rate
         c = 2.996 / c
 
         points = ret['points']
-        points[:, 3] *= 255
+
+        if self.dataset_name == config.kitti:
+            # 0-1 --> 0-255
+            points[:, 3] *= 255
 
         points, _, _ = simulate_fog(ParameterSet(alpha=c), points, noise=0)
 
-        points[:, 3] /= 255
+        if self.dataset_name == config.kitti:
+            # 0-255 --> 0-1
+            points[:, 3] /= 255
+
         ret['points'] = points.astype(np.float32)
-        ret['ref_points'] = copy.deepcopy(ret['points'])
+        ret['weather_type'] = 'fog'
 
         return [ret]
 
-    @staticmethod
-    def _translocate_mutate(ret, rate=None, DUMPS=None):
+    def translocate(self, ret, rate=None, DUMPS=None):
         s = np.random.choice(ret['selected_pc_mask'].shape[0])
 
         diff = Polygon()
@@ -330,8 +344,11 @@ class Mutators():
         box = copy.deepcopy(ret['selected_gt_boxes'][s])
         ref_center = copy.deepcopy(box[0:2])
 
-        center = generate_location_cheaply(
-            hull, DUMPS['scene'][ret['scene']]['gt_polygon'], ret['criteria'])
+        if DUMPS is not None:
+            center = self.generate_location_cheaply(
+                hull, DUMPS['scene'][ret['scene']]['gt_polygon'])
+        else:
+            center = None
 
         try_num = 30
         while try_num:
@@ -360,11 +377,6 @@ class Mutators():
             points[:, 0:2] += center - ref_center
             ret['points'][ret['selected_pc_mask'][s]] = points
 
-            ret['annos']['location'][s][2] = np.round(
-                ret['annos']['location'][s][2] + (center - ref_center)[0], 2)
-            ret['annos']['location'][s][0] = np.round(
-                ret['annos']['location'][s][0] - (center - ref_center)[1], 2)
-
             ret['selected_gt_boxes'][s] = box
             ret['is_fn'][s] = False
             ret['is_fn2'][s] = False
@@ -375,8 +387,7 @@ class Mutators():
 
         return [ret]
 
-    @staticmethod
-    def _rotation_mutate(ret, rate=None, DUMPS=None):
+    def rotation(self, ret, rate=None, DUMPS=None):
         hull = ret['road_hull']
 
         try_num = 30
@@ -411,9 +422,6 @@ class Mutators():
                 angle_modified = angle_modified - angle_modified / abs(
                     angle_modified) * 2 * np.pi
 
-            ret['annos']['rotation_y'][s] = np.round(
-                -angle_modified - np.pi / 2, 2)
-
             ret['selected_gt_boxes'][s][6] = angle_modified
             ret['is_fn'][s] = False
             ret['is_fn2'][s] = False
@@ -424,53 +432,7 @@ class Mutators():
 
         return [ret]
 
-    # @staticmethod
-    # def _shear_mutate(ret, rate=None):
-    #     c = np.random.uniform(0.05, 0.25) if rate is None else rate
-
-    #     for __i__, mask in enumerate(ret['selected_pc_mask']):
-    #         points = ret['points'][mask]
-
-    #         points = Lidar_to_Max2(points, ret['selected_gt_boxes'][__i__])
-
-    #         a = np.random.uniform(c - 0.05, c + 0.05) * np.random.choice(
-    #             [-1, 1])
-    #         b = np.random.uniform(c - 0.05, c + 0.05) * np.random.choice(
-    #             [-1, 1])
-    #         d = np.random.uniform(c - 0.05, c + 0.05) * np.random.choice(
-    #             [-1, 1])
-    #         e = np.random.uniform(c - 0.05, c + 0.05) * np.random.choice(
-    #             [-1, 1])
-
-    #         matrix = np.array([1, a, 0, b, 1, 0, d, e, 1]).reshape(3, 3)
-
-    #         points[:, :3] = np.matmul(points[:, :3], matrix).astype(np.float32)
-
-    #         points = normalize(points)
-
-    #         ret['points'][mask] = Max2_to_Lidar(
-    #             points, ret['selected_gt_boxes'][__i__])
-
-    #     return [ret]
-
-    @staticmethod
-    def _ffd_distortion_mutate(ret, rate=None, DUMPS=None):
-        # c = np.random.uniform(0.1, 0.5) if rate is None else rate
-        c = np.random.uniform(1, 5) if rate is None else rate
-
-        for __i__, mask in enumerate(ret['selected_pc_mask']):
-            points = ret['points'][mask]
-
-            points = Lidar_to_Max2(points, ret['selected_gt_boxes'][__i__])
-            points[:, :3] = distortion(points[:, :3], severity=c)
-            points = normalize(points)
-            ret['points'][mask] = Max2_to_Lidar(
-                points, ret['selected_gt_boxes'][__i__])
-
-        return [ret]
-
-    @staticmethod
-    def _scale_mutate(ret, rate=None, DUMPS=None):
+    def scale(self, ret, rate=None, DUMPS=None):
         hull = ret['road_hull']
 
         try_num = 30
@@ -501,10 +463,6 @@ class Mutators():
             ret['points'][ret['selected_pc_mask'][s]] = Max2_to_Lidar(
                 points, ret['selected_gt_boxes'][s])
 
-            ret['annos']['dimensions'][s] = np.round(
-                np.matmul(ret['annos']['dimensions'][s],
-                          np.array([[xs, 0, 0], [0, zs, 0], [0, 0, ys]])), 2)
-
             ret['selected_gt_boxes'][s][3:6] = np.matmul(
                 ret['selected_gt_boxes'][s][3:6],
                 np.array([[xs, 0, 0], [0, ys, 0], [0, 0, zs]]))
@@ -517,17 +475,15 @@ class Mutators():
 
         return [ret]
 
-    @staticmethod
-    def _insert_mutate(ret, rate=None, DUMPS=None):
+    def insert(self, ret, rate=None, DUMPS=None):
 
         obj_car_dirs = os.listdir('_assets/shapenet')
         obj_num = len(obj_car_dirs)
 
         objs_index = np.random.randint(1, obj_num)
 
-        obj_mesh_path = Path(
-            '/home/szw/code/r_deephunter/_assets/shapenet'
-        ) / obj_car_dirs[objs_index] / 'models' / 'model_normalized.gltf'
+        obj_mesh_path = Path('_assets/shapenet') / obj_car_dirs[
+            objs_index] / 'models' / 'model_normalized.gltf'
 
         road_pc_valid = get_valid_pints(ret['mtest_calib'], ret['road_pc'])
         mesh_obj_initial = load_normalized_mesh_obj(obj_mesh_path.as_posix())
@@ -579,7 +535,13 @@ class Mutators():
                                                 [pcd_obj], [mesh_obj],
                                                 [label_ins])
         mixed_pc = complet_pc(combine_pc).astype(np.float32)
-        mixed_pc[:, -1] = 0.1
+
+        if self.dataset_name == config.kitti:
+            mixed_pc[:, -1] = 0.1
+        elif self.dataset_name == config.nuscenes:
+            mixed_pc[:, -1] = 25
+        else:
+            raise NotImplementedError
 
         gt_boxes_ins = np.concatenate([
             box.center.reshape(1, -1),\
@@ -589,36 +551,6 @@ class Mutators():
         ret['selected_gt_boxes'] = np.append(ret['selected_gt_boxes'],
                                              gt_boxes_ins,
                                              axis=0).astype(np.float32)
-
-        obj_list = [Object3d(label_ins)]
-        annotations = {}
-        annotations['name'] = np.array([obj.cls_type for obj in obj_list])
-        annotations['truncated'] = np.array(
-            [obj.truncation for obj in obj_list])
-        annotations['occluded'] = np.array([obj.occlusion for obj in obj_list])
-        annotations['alpha'] = np.array([obj.alpha for obj in obj_list])
-        annotations['bbox'] = np.concatenate(
-            [obj.box2d.reshape(1, 4) for obj in obj_list], axis=0)
-        annotations['dimensions'] = np.array([[obj.l, obj.h, obj.w]
-                                              for obj in obj_list
-                                              ])  # lhw(camera) format
-        annotations['location'] = np.concatenate(
-            [obj.loc.reshape(1, 3) for obj in obj_list], axis=0)
-        annotations['rotation_y'] = np.array([obj.ry for obj in obj_list])
-        annotations['score'] = np.array([obj.score for obj in obj_list])
-        annotations['difficulty'] = np.array([obj.level for obj in obj_list],
-                                             np.int32)
-
-        num_objects = len(
-            [obj.cls_type for obj in obj_list if obj.cls_type != 'DontCare'])
-        num_gt = len(annotations['name'])
-        index = list(range(num_objects)) + [-1] * (num_gt - num_objects)
-        annotations['index'] = np.array(index, dtype=np.int32)
-        annotations['gt_boxes_lidar'] = gt_boxes_ins
-        annotations['num_points_in_gt'] = np.array([-1], dtype=np.int32)
-        for _k in ret['annos']:
-            ret['annos'][_k] = np.concatenate(
-                [ret['annos'][_k], annotations[_k]], axis=0)
 
         corners_lidar = box_utils.boxes_to_corners_3d(ret['selected_gt_boxes'])
         selected_mask = None
@@ -639,27 +571,17 @@ class Mutators():
 
         ret['selected_pc_mask'] = selected_mask
         ret['points'] = mixed_pc
-        ret['selected_name'] = np.concatenate([ret['selected_name'], ['Car']])
+
+        if self.dataset_name == config.kitti:
+            ret['selected_name'] = np.concatenate(
+                [ret['selected_name'], ['Car']])
+        elif self.dataset_name == config.nuscenes:
+            ret['selected_name'] = np.concatenate(
+                [ret['selected_name'], ['car']])
+        else:
+            raise NotImplementedError
+
         ret['is_fn'] = np.concatenate([ret['is_fn'], [False]])
         ret['is_fn2'] = np.concatenate([ret['is_fn2'], [False]])
 
         return [ret]
-
-
-METHOD = {
-    'rain': Mutators._rain_mutate,
-    'snow': Mutators._snow_mutate,
-    'fog': Mutators._fog_mutate,
-    'translocate': Mutators._translocate_mutate,
-    'rotation': Mutators._rotation_mutate,
-    # 'shear': Mutators._shear_mutate,
-    'ffd': Mutators._ffd_distortion_mutate,
-    'scale': Mutators._scale_mutate,
-    'insert': Mutators._insert_mutate
-}
-
-WEATHER_METHOD = {
-    'rain': Mutators._rain_,
-    'snow': Mutators._snow_,
-    'fog': Mutators._fog_
-}

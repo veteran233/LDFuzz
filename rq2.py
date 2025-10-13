@@ -1,6 +1,6 @@
 import os
 
-os.environ['PROJECT_DIR'] = '/home/szw/code/r_deephunter'
+os.environ['PROJECT_DIR'] = os.path.dirname(__file__)
 
 import pickle
 import numpy as np

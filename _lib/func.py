@@ -2,105 +2,111 @@
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
-import sys
 import copy
 import pickle
+from functools import partial
 
 import numpy as np
-import torch
+import numba
+from torch import no_grad
+from torch.cuda import empty_cache
 
 import shapely
-from shapely.geometry import MultiPoint, Polygon, MultiPolygon
+from shapely.geometry import Polygon
 
+from pcdet.utils import box_utils
 from pcdet.ops.iou3d_nms import iou3d_nms_utils
 
 from _lib.queue.queue import FuzzQueue
-from _lib.queue.queue_coverage import ImageInputCorpus
-from _lib.queue.seed import Seed
-from _others.velodyne_mutators import METHOD, WEATHER_METHOD
-from utils import config, DUMPS_utlis
+from _others.velodyne_mutators import Mutator
+from utils import config, DUMPS_utlis, model_utils
 from utils.coverage_utils import cal_single_c1, cal_single_c2, get_gt_polygon, get_scene_graph_encode
 
 
-def metadata_function(meta_batches):
-    return meta_batches
+@numba.jit(nopython=True)
+def boxes_bev_centerpoint_distance(boxes_a: np.ndarray, boxes_b: np.ndarray):
+    point_a = boxes_a[:, :2]
+    point_b = boxes_b[:, :2]
+    ans = np.zeros((point_a.shape[0], point_b.shape[0]), dtype=np.float32)
+    for index, b in enumerate(point_b):
+        x = point_a - b
+        x = x**2
+        x = x.sum(axis=-1)
+        x = np.sqrt(x)
+        ans[:, index] = x
+    return ans
 
 
-def image_mutation_function(batch_num):
-    # Given a seed, randomly generate a batch of mutants
-    def func(seed):
-        return Mutators.image_random_mutate(seed, batch_num)
+def lidar_mutation_functionV1(dataset_name, criteria=None):
 
-    return func
-
-
-def velodyne_mutation_function(no_seed=False):
+    mutator = Mutator(dataset_name, criteria)
+    METHOD = mutator.generate_method_list()
 
     def mutate(batch, method_list=None):
         if method_list is None:
-            if batch['weather_type'] in config.scene_level:
-                method_list = np.array(config.object_level)
-            else:
-                method_list = np.array(config.object_level +
-                                       config.scene_level)
-        else:
-            if not isinstance(method_list, np.ndarray):
-                method_list = np.array(method_list)
+            method_list = np.array(config.object_level + config.scene_level)
+        elif not isinstance(method_list, np.ndarray):
+            method_list = np.array(method_list)
 
-        method = np.random.choice(method_list)
+        method_list = np.random.permutation(method_list)
 
-        batch['method'] = method
-        print('mutation : %s' % method)
-
-        try:
-            return METHOD[method](copy.deepcopy(batch))
-        except:
-            print(
-                f'method --{method}-- failed to mutate, which will be choose another.'
-            )
-
-            method_list = method_list[method_list != method]
-            if len(method_list) == 0:
-                method_list = None
-
-            return mutate(batch, method_list)
-
-    def func(seed, method_list=None):
-        with open(seed.fname, 'rb') as f:
-            batch = pickle.load(f)
-        return mutate(batch, method_list)
-
-    def func2(batch, method_list=None):
-        return mutate(copy.deepcopy(batch), method_list)
-
-    if no_seed: return func2
-    else: return func
-
-
-def velodyne_mutation_function_2(queue: FuzzQueue):
-
-    def mutate():
-        method = np.random.choice(config.object_level + config.scene_level)
-        print(f'Select {method}')
-
-        while (True):
-            parent = queue.select_next(1)[0]
-            with open(parent.fname, 'rb') as f:
-                batch = pickle.load(f)
-
+        for method in method_list:
             if method in config.scene_level and batch[
                     'weather_type'] in config.scene_level:
-                method = np.random.choice(config.object_level)
-                print(f'Select Object-Level : {method}')
+                continue
 
             batch['method'] = method
+            print(f'  select method : {method}', end='')
 
             try:
-                return parent, METHOD[method](batch, DUMPS=queue.DUMPS)[0]
+                result = METHOD[method](batch)
+                print(' -- ok')
+                return result
             except:
-                del batch
-                del parent
-                continue
+                print(' -- failed')
+
+        print('  all methods failed.')
+        return batch
+
+    return mutate
+
+
+def lidar_mutation_functionV2(queue: FuzzQueue, dataset_name, criteria=None):
+
+    mutator = Mutator(dataset_name, criteria)
+    METHOD = mutator.generate_method_list()
+
+    def mutate():
+        while True:
+            seed = queue.select_next(1)[0]
+            parent = seed.parent
+
+            batch = pickle.load(open(seed.fname, 'rb'))
+
+            while isinstance(batch, list):
+                batch = batch[0]
+            print(
+                f'select seed id : {seed.id}, parent {parent.id if parent is not None else None}'
+            )
+
+            method_list = np.random.permutation(config.object_level +
+                                                config.scene_level)
+            for method in method_list:
+                if method in config.scene_level and batch[
+                        'weather_type'] in config.scene_level:
+                    continue
+
+                batch['method'] = method
+                print(f'  select method : {method}', end='')
+
+                try:
+                    return method, seed, METHOD[method](batch,
+                                                        DUMPS=queue.DUMPS)[0]
+                except Exception as e:
+                    print(f' -- failed')
+                    continue
+
+            print('  choose another seed.')
 
     return mutate
 
@@ -112,48 +118,43 @@ def build_objective_function(args):
         ground_truth = data_batch['selected_gt_boxes']
         method = data_batch['method']
 
-        pred_scores = data_batch['pred_scores']
-        gt_scores_list = \
-            data_batch['gt_scores_list']\
-            if 'gt_scores_list' in data_batch else\
-            np.array([2] * ground_truth.shape[0], dtype=np.float32)
+        pred_labels = data_batch['pred_labels']
 
-        if gt_scores_list.shape[0] < ground_truth.shape[0]:
-            gt_scores_list = \
-                np.concatenate([
-                    gt_scores_list,
-                    [2] * (ground_truth.shape[0] - gt_scores_list.shape[0])
-                ])
-
-        ref_gt_scores_list = copy.deepcopy(gt_scores_list)
-
-        iou = iou3d_nms_utils.boxes_bev_iou_cpu(ground_truth, pd_boxes)
-        iou_gt, iou_pd = np.where(iou >= args.iou_threshold)
-        gt_scores_list[iou_gt] = pred_scores[iou_pd]
-        all_gt = np.array(list(range(gt_scores_list.shape[0])))
-        gt_scores_list[np.delete(all_gt, iou_gt)] = 0
-        data_batch['gt_scores_list'] = gt_scores_list
-
-        if iou.shape[1] != 0:
-            _iou = copy.deepcopy(iou)
-            _iou[_iou < _iou.max(axis=0).reshape(1, -1)] = 0
-            _iou[_iou < _iou.max(axis=1).reshape(-1, 1)] = 0
-
-            obj_missing = np.sum(np.max(_iou, axis=1).reshape(-1) <= 0)
-            false_det = np.sum(np.max(_iou, axis=0).reshape(-1) <= 0)
-            fail_loc = np.sum(
-                ((0 < _iou) * (_iou < args.iou_threshold)).reshape(-1))
+        if args.use_distance:
+            iou = boxes_bev_centerpoint_distance(ground_truth, pd_boxes)
         else:
-            obj_missing = iou.shape[0]
-            false_det = 0
-            fail_loc = 0
+            iou = iou3d_nms_utils.boxes_bev_iou_cpu(ground_truth, pd_boxes)
 
-        if iou.shape[1] != 0:
-            iou = np.max(iou, axis=1).reshape(-1)
+        if args.use_distance:
+            if iou.shape[0] != 0:
+                fp_list = np.min(iou, axis=0).reshape(-1)
+            else:
+                fp_list = np.array([1000000] * iou.shape[1], dtype=np.float32)
+            fp_list = np.where(fp_list > args.distance_threshold)[0]
+
+            if iou.shape[1] != 0:
+                iou = np.min(iou, axis=1).reshape(-1)
+            else:
+                iou = np.array([1000000] * iou.shape[0], dtype=np.float32)
+            fn_list = np.where(iou > args.distance_threshold)[0]
         else:
-            iou = np.array([0] * iou.shape[0])
+            if iou.shape[0] != 0:
+                fp_list = np.max(iou, axis=0).reshape(-1)
+            else:
+                fp_list = np.zeros(iou.shape[1], dtype=np.float32)
+            fp_list = np.where(fp_list < args.iou_threshold)[0]
 
-        tp = np.sum(iou >= args.iou_threshold)
+            if iou.shape[1] != 0:
+                iou = np.max(iou, axis=1).reshape(-1)
+            else:
+                iou = np.zeros(iou.shape[0], dtype=np.float32)
+            fn_list = np.where(iou < args.iou_threshold)[0]
+
+        if args.use_distance:
+            tp = np.sum(iou <= args.distance_threshold)
+        else:
+            tp = np.sum(iou >= args.iou_threshold)
+
         fp = len(pd_boxes) - tp
         fn = len(ground_truth) - tp
         data_batch['iou_tp'] = tp
@@ -173,17 +174,6 @@ def build_objective_function(args):
 
         args.DUMPS['fp'][method][-1] += fp
         args.DUMPS['fn'][method][-1] += fn
-        args.DUMPS['fn1'][method][-1] += np.sum(
-            (data_batch['is_fn'] == False) * (iou < args.iou_threshold))
-        data_batch['is_fn'] += iou < args.iou_threshold
-
-        args.DUMPS['fn2'][method][-1] += np.sum(
-            (data_batch['is_fn2'] == False) * (iou < args.iou_threshold))
-        data_batch['is_fn2'] += iou < args.iou_threshold
-
-        args.DUMPS['obj_missing'][method][-1] += obj_missing
-        args.DUMPS['false_det'][method][-1] += false_det
-        args.DUMPS['fail_loc'][method][-1] += fail_loc
 
         s_gt_boxes = data_batch['selected_gt_boxes']
         s_name = data_batch['selected_name']
@@ -198,44 +188,17 @@ def build_objective_function(args):
         dict_scene['method_times'][method] += 1
         dict_scene['total_times'] += 1
 
-        # ## RQ3
-        # fn3_count = 0
-        # for i_fn in fn_list:
-        #     cor = box_utils.boxes_to_corners_3d(s_gt_boxes[np.newaxis, i_fn])
-        #     cor = shapely.convex_hull(MultiPoint(cor[0, :4, :2]))
-        #     if not dict_scene['error_polygon'].contains(cor):
-        #         fn3_count += 1
-
-        #     dict_scene['error_polygon'] = shapely.union(
-        #         dict_scene['error_polygon'], cor)
-
-        # args.DUMPS['fn3'][method][-1] += fn3_count
-        # dict_cluster['error_cluster'].add(
-        #     get_scene_graph_encode(s_gt_boxes[fn_list], s_name[fn_list],
-        #                            weather_type, sg_type))
-        # ## RQ3 End
-
         gt_polygon = get_gt_polygon(s_gt_boxes)
         err_polygon = get_gt_polygon(s_gt_boxes[fn_list])
         if err_polygon is None: err_polygon = Polygon()
 
-        sg_encode = get_scene_graph_encode(s_gt_boxes, s_name, weather_type,
-                                           sg_type)
-        err_sg_encode = get_scene_graph_encode(s_gt_boxes[fn_list],
+        sg_encode = get_scene_graph_encode(args.dataset_name, s_gt_boxes,
+                                           s_name, weather_type, sg_type)
+        err_sg_encode = get_scene_graph_encode(args.dataset_name,
+                                               s_gt_boxes[fn_list],
                                                s_name[fn_list], weather_type,
                                                sg_type)
-        # if fn_list.shape[0] > 0: err_sg_encode = sg_encode
-        # else: err_sg_encode = 0
-        # dict_scene['gt_polygon'] = shapely.union(dict_scene['gt_polygon'],
-        #                                          get_gt_polygon(s_gt_boxes))
-        # dict_scene['cluster'].add(sg_encode)
 
-        # GLOBAL
-        # dict_cluster['cluster'].add(sg_encode)
-        # dict_cluster['error_cluster'].add(err_sg_encode)
-        # GLOBAL END
-
-        # add to Error Detail
         args.DUMPS['error_detail'].append({
             'scene': scene,
             'scene_graph_type': sg_type,
@@ -243,6 +206,7 @@ def build_objective_function(args):
             'weather_type': weather_type,
             'gt_boxes': s_gt_boxes,
             'fn_list': fn_list,
+            'fp_list': fp_list,
             'sg_encode': sg_encode,
             'err_sg_encode': err_sg_encode
         })
@@ -252,8 +216,6 @@ def build_objective_function(args):
         ref_err_polygon = dict_scene['error_polygon']
         ref_err_cluster = dict_cluster['error_cluster']
 
-        # coverage1 = get_scene_coverage1_DUMPSver(args.DUMPS, scene)
-        # coverage2 = get_scene_coverage2_DUMPSver(args.DUMPS, scene)
         gt_polygon = shapely.union(ref_gt_polygon, gt_polygon)
 
         cluster = copy.deepcopy(ref_cluster)
@@ -264,81 +226,40 @@ def build_objective_function(args):
         err_cluster = copy.deepcopy(ref_err_cluster)
         err_cluster.add(err_sg_encode)
 
-        ref_mean_scores = np.mean(ref_gt_scores_list)
-        mean_scores = np.mean(gt_scores_list)
+        def ind2cls(labels):
+            if args.dataset_name == config.nuscenes:
+                CLASS_NAMES = [
+                    'car', 'truck', 'construction_vehicle', 'bus', 'trailer',
+                    'barrier', 'motorcycle', 'bicycle', 'pedestrian',
+                    'traffic_cone'
+                ]
 
-        # if args.criteria == 'c1_confi':
-        #     ret = ref_coverage1 < coverage1 or mean_scores <= ref_mean_scores
-        # elif args.criteria == 'c2_confi':
-        #     ret = ref_coverage2 < coverage2 or mean_scores <= ref_mean_scores
-        # elif args.criteria == 'confi':
-        #     ret = mean_scores <= ref_mean_scores
-        # elif args.criteria == 'c1':
-        #     ret = ref_coverage1 < coverage1
-        # elif args.criteria == 'c2':
-        #     ret = ref_coverage2 < coverage2
-        # elif args.criteria == 'none':
-        #     ret = True
-        # else:
-        #     raise Exception(
-        #         'Please select criteria in [c1_confi, c2_confi, confi, c1, c2, none]'
-        #     )
+            elif args.dataset_name == config.kitti:
+                CLASS_NAMES = ['Car', 'Pedestrian', 'Cyclist']
 
-        # if data_batch['method'] in config.scene_level:
-        #     ret = True
+            ret = [CLASS_NAMES[x - 1] for x in labels]
+            return np.array(ret)
 
-        # method = data_batch['method']
-        # d_coverage = coverage1 - dict_scene['coverage1']
-        # dict_scene['prob'][method] += (1.0 + config.ITER / config.ITERS) * (
-        #     d_coverage / 0.03) * (1.0 / dict_scene['prob'][method])
+        fp_polygon = get_gt_polygon(pd_boxes)
+        if fp_polygon is None: fp_polygon = Polygon()
+        fp_sg_encode = get_scene_graph_encode(args.dataset_name, pd_boxes,
+                                              ind2cls(pred_labels),
+                                              weather_type, sg_type)
 
-        # DUMPS['prob'][scene] = 1.0 / (0.1 + coverage1)
+        ref_fp_polygon = dict_scene['fp_polygon']
+        ref_fp_cluster = dict_cluster['fp_cluster']
 
-        # if ret: dict_scene['scene_len'] += 1
-
-        # method = data_batch['method']
-        # if args.criteria == 'c1':
-        #     d_c1 = max(coverage1 - ref_coverage1, 0)
-        #     if d_c1 == 0:
-        #         dict_scene['prob'][method] = 1
-        #     else:
-        #         dict_scene['prob'][method] = np.exp(
-        #             np.power(coverage1 * d_c1, 1 / 3))
-        # elif args.criteria == 'c2':
-        #     d_c2 = max(coverage2 - ref_coverage2, 0)
-        #     if d_c2 == 0:
-        #         dict_scene['prob'][method] = 1
-        #     else:
-        #         dict_scene['prob'][method] = np.exp(
-        #             np.power(coverage2 * d_c2, 1 / 3))
-        # elif args.criteria == 'none':
-        #     dict_scene['prob'][method] = 1
-        # else:
-        #     raise Exception('Please select criteria in [c1, c2, none]')
-
-        # dict_scene['coverage1'] = coverage1
-        # dict_scene['coverage2'] = coverage2
-
-        # args.DUMPS['crash'].append(int(not ret))
-        # args.DUMPS['crash'][-1] += args.DUMPS['crash'][-2]
-
-        # print(f'in queue : {ret}')
-
-        # d_sec = np.inf
-        # for _sg in ref_cluster:
-        #     d_sec = min(d_sec, bin(sg_encode ^ _sg).count('1'))
-
-        # d_err_sec = np.inf
-        # for _sg in ref_err_cluster:
-        #     d_err_sec = min(d_err_sec, bin(err_sg_encode ^ _sg).count('1'))
-
-        # eps = np.finfo(np.float32).eps
+        fp_polygon = shapely.union(ref_fp_polygon, fp_polygon)
+        fp_cluster = copy.deepcopy(ref_fp_cluster)
+        fp_cluster.add(fp_sg_encode)
 
         return scene,\
                gt_polygon,\
                sg_encode,\
                err_polygon,\
                err_sg_encode,\
+               fp_polygon,\
+               fp_sg_encode,\
                cal_single_c1(gt_polygon, dict_scene['road_hull']),\
                cal_single_c2(cluster, sg_type),\
                cal_single_c1(err_polygon, dict_scene['road_hull']),\
@@ -349,35 +270,33 @@ def build_objective_function(args):
 
 def iterate_function(args):
 
-    def func(queue: FuzzQueue, parent_list, mutated_data_batches,
+    def func(queue: FuzzQueue, seed_list, mutated_data_batches,
              objective_function):
-
-        # successed = False
-        # bug_found = False
-
-        inputs = []
 
         scene_list = []
         gt_polygon_list = []
         sg_encode_list = []
         err_polygon_list = []
         err_sg_encode_list = []
+        fp_polygon_list = []
+        fp_sg_encode_list = []
         results = []
 
         DUMPS_utlis.updateIter_DUMPS_errorMetric(args.DUMPS)
 
         for idx in range(len(mutated_data_batches)):
-            inputs.append(Seed(parent_list[idx].root_seed, parent_list[idx]))
             res = [0, 0, 0, 0]
-            scene, gt_polygon, sg_encode, err_polygon, err_sg_encode, res[
+            scene, gt_polygon, sg_encode, err_polygon, err_sg_encode, fp_polygon, fp_sg_encode, res[
                 0], res[1], res[2], res[3] = objective_function(
-                    inputs[-1], mutated_data_batches[idx])
+                    seed_list[idx], mutated_data_batches[idx])
 
             scene_list.append(scene)
             gt_polygon_list.append(gt_polygon)
             sg_encode_list.append(sg_encode)
             err_polygon_list.append(err_polygon)
             err_sg_encode_list.append(err_sg_encode)
+            fp_polygon_list.append(fp_polygon)
+            fp_sg_encode_list.append(fp_sg_encode)
             results.append(res)
 
         for idx in range(len(mutated_data_batches)):
@@ -386,6 +305,8 @@ def iterate_function(args):
             sg_encode = sg_encode_list[idx]
             err_polygon = err_polygon_list[idx]
             err_sg_encode = err_sg_encode_list[idx]
+            fp_polygon = fp_polygon_list[idx]
+            fp_sg_encode = fp_sg_encode_list[idx]
 
             dict_scene = args.DUMPS['scene'][scene]
             sg_type = dict_scene['scene_graph_type']
@@ -397,6 +318,9 @@ def iterate_function(args):
             dict_scene['error_polygon'] = shapely.union(
                 dict_scene['error_polygon'], err_polygon)
             dict_cluster['error_cluster'].add(err_sg_encode)
+            dict_scene['fp_polygon'] = shapely.union(dict_scene['fp_polygon'],
+                                                     fp_polygon)
+            dict_cluster['fp_cluster'].add(fp_sg_encode)
 
             if sg_encode not in dict_cluster['count_cluster']:
                 dict_cluster['count_cluster'][sg_encode] = 0
@@ -406,14 +330,9 @@ def iterate_function(args):
                 dict_cluster['count_error_cluster'][err_sg_encode] = 0
             dict_cluster['count_error_cluster'][err_sg_encode] += 1
 
-            # dict_scene['coverage1'] = cal_single_c1(dict_scene['gt_polygon'],
-            #                                         dict_scene['road_hull'])
-            # dict_cluster['coverage2'] = cal_single_c2(dict_cluster['cluster'],
-            #                                           sg_type)
-            # dict_scene['error_coverage1'] = cal_single_c1(
-            #     dict_scene['error_polygon'], dict_scene['road_hull'])
-            # dict_cluster['error_coverage2'] = cal_single_c2(
-            #     dict_cluster['error_cluster'], sg_type)
+            if fp_sg_encode not in dict_cluster['count_fp_cluster']:
+                dict_cluster['count_fp_cluster'][fp_sg_encode] = 0
+            dict_cluster['count_fp_cluster'][fp_sg_encode] += 1
 
         if len(mutated_data_batches):
             results = np.array(results, dtype=np.float32)
@@ -423,9 +342,9 @@ def iterate_function(args):
                 return idx
 
             if args.criteria == config.spc:
-                idx = strategy_func(0)
+                idx = strategy_func(2)
             elif args.criteria == config.sec:
-                idx = strategy_func(1)
+                idx = strategy_func(3)
             elif args.criteria == config.error_spc:
                 idx = strategy_func(2)
             elif args.criteria == config.error_sec:
@@ -436,164 +355,116 @@ def iterate_function(args):
                 idx = strategy_func(0) + strategy_func(1)
             elif args.criteria == config.error_mixed:
                 idx = strategy_func(2) + strategy_func(3)
+            elif args.criteria == config.lirtest:
+                idx = [np.random.choice(len(mutated_data_batches))]
             else:
                 raise Exception()
 
             print(f'Select #{idx}')
             for _idx in idx:
 
-                # scene = scene_list[_idx]
-                # gt_polygon = gt_polygon_list[_idx]
-                # sg_encode = sg_encode_list[_idx]
-                # err_polygon = err_polygon_list[_idx]
-                # err_sg_encode = err_sg_encode_list[_idx]
-                # iou = iou_list[_idx]
-
-                # dict_scene = args.DUMPS['scene'][scene]
-                # sg_type = dict_scene['scene_graph_type']
-                # dict_cluster = args.DUMPS['cluster'][sg_type]
-
-                # dict_scene['gt_polygon'] = shapely.union(
-                #     dict_scene['gt_polygon'], gt_polygon)
-                # dict_scene['cluster'].add(sg_encode)
-                # dict_scene['error_polygon'] = shapely.union(
-                #     dict_scene['error_polygon'], err_polygon)
-                # dict_scene['error_cluster'].add(err_sg_encode)
-
-                # dict_scene['coverage1'] = cal_single_c1(
-                #     dict_scene['gt_polygon'], dict_scene['road_hull'])
-                # dict_scene['coverage2'] = cal_single_c2(
-                #     dict_scene['cluster'], sg_type)
-                # dict_scene['error_coverage1'] = cal_single_c1(
-                #     dict_scene['error_polygon'], dict_scene['road_hull'])
-                # dict_scene['error_coverage2'] = cal_single_c2(
-                #     dict_scene['error_cluster'], sg_type)
-
+                seed = seed_list[_idx]
                 data_batch = mutated_data_batches[_idx]
 
-                # pd_boxes = data_batch['pred_boxes']
-                # ground_truth = data_batch['selected_gt_boxes']
                 method = data_batch['method']
 
-                # tp = np.sum(iou >= 0.5)
-                # fp = len(pd_boxes) - tp
-                # fn = len(ground_truth) - tp
-                # data_batch['iou_tp'] = tp
-
-                # args.DUMPS['fp'][method][-1] += fp
-
-                # args.DUMPS['fn'][method][-1] += fn
-
-                # args.DUMPS['fn1'][method][-1] += np.sum(
-                #     (data_batch['is_fn'] == False) * (iou < 0.5))
-                # data_batch['is_fn'] += iou < 0.5
-
-                # args.DUMPS['fn2'][method][-1] += np.sum(
-                #     (data_batch['is_fn2'] == False) * (iou < 0.5))
-                # data_batch['is_fn2'] += iou < 0.5
-
                 args.DUMPS['inqueue_method_times'][method] += 1
-                queue.save_if_interesting(inputs[_idx], data_batch, False)
-
-            # if not results:
-            #     queue.save_if_interesting(input, mutated_data_batches[idx], True)
-            #     bug_found = True
-            # else:
-            #     queue.save_if_interesting(input, mutated_data_batches[idx], False)
-            #     successed = True
-
-            # return bug_found, successed
+                queue.save_if_interesting(seed, data_batch, False)
 
     return func
 
 
 #############################
 # fetch_function
-def fetch_function(model, loader, input_batches, is_eval):
-    input_batches = copy.deepcopy(input_batches)
-    if input_batches[0]['weather_type'] in WEATHER_METHOD:
-        input_batches = WEATHER_METHOD[input_batches[0]['weather_type']](
-            input_batches[0], input_batches[0]['w_c'])
+def fetch_function(dataset_name, model, loader, infos_dict):
 
-    loader.dataset.kitti_infos = input_batches
-
-    batches = list(loader)[0]
-
-    for __tmp__ in batches:
-        if not isinstance(batches[__tmp__], torch.Tensor):
-            if __tmp__ == 'ref_points': continue
-            elif __tmp__ == 'road_hull': continue
-            elif __tmp__ == 'road_pc': continue
-            elif __tmp__ == 'road_labels': continue
-            elif __tmp__ == 'non_road_pc': continue
-            elif __tmp__ == 'mtest_calib': continue
-            try:
-                batches[__tmp__] = torch.tensor(data=batches[__tmp__],
-                                                device=config.TORCH_DEVICE)
-            except:
-                None
-
-    if config.TORCH_DEVICE is 'cpu':
-        layer_outputs = model.forward(batches)
-    elif config.TORCH_DEVICE is 'cuda':
-        layer_outputs = model.cuda().forward(batches)
+    if dataset_name == config.kitti:
+        loader.dataset.kitti_infos = infos_dict
+    elif dataset_name == config.nuscenes:
+        loader.dataset.infos = infos_dict
     else:
-        raise Exception('Please select TORCH_DEVICE in [cpu, cuda]')
-
-    # SAVE GPU MEMORY
-    del batches
-    del input_batches
-    torch.cuda.empty_cache()
+        raise NotImplementedError
 
     pred_boxes = []
     pred_scores = []
     pred_labels = []
-    for __i__ in range(len(layer_outputs[0])):
-        pred_boxes.append(
-            layer_outputs[0][__i__]['pred_boxes'].detach().cpu().numpy())
-        pred_scores.append(
-            layer_outputs[0][__i__]['pred_scores'].detach().cpu().numpy())
-        pred_labels.append(
-            layer_outputs[0][__i__]['pred_labels'].detach().cpu().numpy())
+    start_index = 0
 
-    del layer_outputs
-    torch.cuda.empty_cache()
+    empty_cache()
+    with no_grad():
+        for batch_dict in loader:
+            model_utils.load_data_to_gpu(batch_dict)
 
-    if is_eval: return pred_scores, pred_boxes, pred_labels
-    else: return pred_scores, pred_boxes
+            layer_outputs = model(batch_dict)
+
+            layer_outputs = layer_outputs[0]
+            batch_size = len(layer_outputs)
+
+            for _b in range(batch_size):
+                pred_boxes.append(layer_outputs[_b]
+                                  ['pred_boxes'].detach().cpu().numpy()[:, :7])
+                pred_scores.append(
+                    layer_outputs[_b]['pred_scores'].detach().cpu().numpy())
+                pred_labels.append(
+                    layer_outputs[_b]['pred_labels'].detach().cpu().numpy())
+
+            # CLASS_NAMES: [
+            #     'car', 'truck', 'construction_vehicle', 'bus', 'trailer', 'barrier',
+            #     'motorcycle', 'bicycle', 'pedestrian', 'traffic_cone'
+            # ]
+            # 6 10
+            # CLASS_NAMES: ['Car', 'Pedestrian', 'Cyclist']
+            # 2 3
+            ######## Filter classes
+            for _b in range(start_index, start_index + batch_size):
+                if dataset_name == config.kitti:
+                    mask = (pred_labels[_b] != 2) * (pred_labels[_b] != 3)
+                elif dataset_name == config.nuscenes:
+                    mask = (pred_labels[_b] != 6) * (pred_labels[_b] != 10)
+                else:
+                    raise NotImplementedError
+
+                pred_boxes[_b] = pred_boxes[_b][mask]
+                pred_scores[_b] = pred_scores[_b][mask]
+                pred_labels[_b] = pred_labels[_b][mask]
+
+            ######## Filter boxes outside range
+            ######## Only for nuScenes dataset
+            if dataset_name == config.nuscenes:
+                point_cloud_range = [-51.2, 0, -5.0, 51.2, 51.2, 3.0]
+                for _b in range(start_index, start_index + batch_size):
+                    mask = box_utils.mask_boxes_outside_range_numpy(
+                        pred_boxes[_b], point_cloud_range)
+
+                    pred_boxes[_b] = pred_boxes[_b][mask]
+                    pred_scores[_b] = pred_scores[_b][mask]
+                    pred_labels[_b] = pred_labels[_b][mask]
+
+            ######## Filter score
+            for _b in range(start_index, start_index + batch_size):
+                mask = (pred_scores[_b] > 0.5)
+
+                pred_boxes[_b] = pred_boxes[_b][mask]
+                pred_scores[_b] = pred_scores[_b][mask]
+                pred_labels[_b] = pred_labels[_b][mask]
+
+            assert len(pred_boxes) == len(pred_scores) and len(
+                pred_scores) == len(pred_labels)
+
+            start_index += batch_size
+
+    return pred_boxes, pred_scores, pred_labels
 
 
-def quantize_fetch_function(handler, input_batches, preprocess, models):
-    _, img_batches, _, _, _ = input_batches
-    if len(img_batches) == 0:
-        return None, None
-    preprocessed = preprocess(img_batches)
+def build_fetch_function(dataset_name, model_name, batch_size):
 
-    layer_outputs = handler.predict(preprocessed)
-    results = np.expand_dims(np.argmax(layer_outputs[-1], axis=1), axis=0)
-    for m in models:
-        r1 = np.expand_dims(np.argmax(m.predict(preprocessed), axis=1), axis=0)
-        results = np.append(results, r1, axis=0)
-    # Return the prediction outputs of all models
-    return layer_outputs, results
+    return partial(
+        fetch_function,
+        dataset_name,
+        *model_utils.load_model(dataset_name, model_name, batch_size),
+    )
 
 
-def build_fetch_function(model, loader, is_eval=False):
+def build_frd_function(dataset_name):
 
-    def func(input_batches):
-        # """The fetch function."""
-        # if models is not None:
-        #     return quantize_fetch_function(handler, input_batches, preprocess,
-        #                                    models)
-        # else:
-        return fetch_function(model, loader, input_batches, is_eval)
-
-    return func
-
-
-def build_frd_function(model):
-
-    def func(input_batches):
-        return model.infer(input_batches)
-
-    return func
+    return model_utils.load_frd_model(dataset_name).infer
